@@ -6,41 +6,29 @@ The [ARAISE web app](https://github.com/Ruthwik000/Arasie) provides the workout 
 
 ## Architecture
 
-The browser and server each run pose detection. The WebSocket route selects the exercise, and the format of each text message determines whether the server can process it.
-
 ```mermaid
-sequenceDiagram
-    box Frontend
-        participant C as Browser client
+flowchart TD
+    subgraph Browser["Frontend · browser"]
+        Camera["Workout camera"] --> Landmarks["MediaPipe detects joints"]
+        Test["One-frame test in this README"]
+        Screen["Workout screen or test console"]
     end
-    box Backend
-        participant W as FastAPI WebSocket
-        participant T as Exercise tracker
-        participant P as MediaPipe Pose
+    subgraph Server["Backend · Python server"]
+        Socket["FastAPI WebSocket"] --> Decode{"Can OpenCV decode an image?"}
+        Decode -->|No| Skip["Skip message without a reply"]
+        Decode -->|Yes| Pose["MediaPipe measures pose"]
+        Pose --> Tracker["Exercise tracker counts reps or times a plank"]
     end
-    C->>W: Connect to /ws/{exercise}
-    W-->>C: Accept connection
-    alt React workout screen
-        C->>C: Detect joints and map to canvas pixels
-        C->>W: JSON text with joint coordinates
-        W->>W: Image decode fails, skip message
-    else Image client or README test
-        C->>W: Base64 image text
-        W->>W: Decode bytes into an OpenCV BGR frame
-        W->>T: Call process(frame) for the selected exercise
-        T->>P: Convert BGR to RGB and infer landmarks
-        P-->>T: Landmarks and visibility scores
-        T->>T: Check visibility, smooth angle, update state
-        T-->>W: Annotated frame, count, feedback, angle, stage
-        W-->>C: JSON metrics and optional base64 JPEG
-    end
+    Landmarks -->|Joint coordinates as JSON| Socket
+    Test -->|Base64 image| Socket
+    Tracker -->|JSON metrics and optional JPEG| Screen
 ```
 
-**Frontend.** In `PoseAnalyzer.jsx`, the camera client calls MediaPipe's `detectForVideo` through `poseDetection.js`. It converts the selected joints to canvas pixel pairs such as `right_elbow: [x, y]`. The WebSocket client serializes `exercise`, `coordinates`, `timestamp`, `planId`, and `level` as JSON. The screen listens for rep counts, stages, joint angles, and feedback, which it can also read aloud.
+**Frontend (browser).** The React workout screen opens the camera for the selected exercise. `PoseAnalyzer.jsx` uses MediaPipe to locate joints in each frame, and `websocket.js` sends their coordinates to `/ws/{exercise}`. When the screen receives a result, it displays the count, angle, stage, and feedback. It can also read the feedback aloud.
 
-**WebSocket contract.** For each message, FastAPI calls `receive_text()`, strips the optional image data URL prefix, then passes the payload through `base64.b64decode`, `np.frombuffer(..., np.uint8)`, and `cv2.imdecode`. Coordinate JSON fails this decode path, so the React client receives no reply for those messages. The [one-frame test](#try-one-frame) exercises the accepted image path. After tracking, `send_json()` returns the metrics and, when encoding succeeds, `processed_frame` as a base64 JPEG at quality 70. See [main.py](./main.py).
+**Backend (Python server).** FastAPI accepts the connection and OpenCV decodes each base64 image. The selected tracker calls MediaPipe on that image, checks that all three required right-side joints have visibility of at least 0.7, and averages up to five valid joint angles. It uses that angle to count a rep or update the plank timer. The server sends the result back over the same socket. See [main.py](./main.py) and [excersises.py](./excersises.py).
 
-**Tracking and state.** The URL selects a process-wide `BicepCurl`, `Squat`, `Pushup`, or `Plank` instance. All four share one `PoseDetector`. When the three required right-side landmarks each have visibility of at least 0.7, the tracker computes the 2D joint angle between adjacent limb segments, folds it into 0–180°, and averages up to five valid readings. Rep trackers count a threshold crossing only after the preceding stage has been reached. The plank tracker accumulates elapsed hold time. The handler runs inference synchronously before sending the response and reading the next message on that connection. See [excersises.py](./excersises.py).
+**Why the two browser paths differ.** The current React client sends joint coordinates as JSON. The backend expects a base64 image, so it skips those messages and the workout screen receives no server feedback from them. The [one-frame test](#try-one-frame) sends an image in the accepted format and prints the server's reply.
 
 ## What each exercise measures
 
