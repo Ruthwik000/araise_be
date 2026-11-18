@@ -4,7 +4,7 @@ This FastAPI service turns a stream of workout images into rep counts, plank hol
 
 The [ARAISE web app](https://github.com/Ruthwik000/Arasie) provides the workout interface. Meal-photo analysis runs in the separate [food backend](https://github.com/Ruthwik000/food_araise).
 
-## Architecture
+## Workout backend architecture
 
 ```mermaid
 flowchart TD
@@ -83,3 +83,44 @@ For live tracking, draw the current video frame onto the canvas before sending i
 ## Session state
 
 Each server process creates one detector and one tracker per exercise. Clients using the same exercise share its counter, stage, and angle history. Reconnecting to the same process keeps that state. Restarting the process clears it. The handler does not use the frontend's `user_id` query parameter to isolate workouts.
+
+## Food backend architecture
+
+One food scan is one HTTP request. The Diet Tracker uploads a meal photo directly to the [food service](https://github.com/Ruthwik000/food_araise). The browser shows the estimate before the user decides whether to log it.
+
+```mermaid
+sequenceDiagram
+    box Frontend
+        participant UI as React Diet Tracker
+    end
+    box Food backend
+        participant API as FastAPI food route
+        participant V as vision.py
+    end
+    box External services
+        participant G as Gemini
+        participant S as SerpAPI
+    end
+    UI->>API: POST /api/v1/food/analyze
+    API->>V: Image bytes and deep_search flag
+    V->>G: Photo and identification prompt
+    G-->>V: Food names and estimated portions
+    opt Nutrition lookup available
+        V->>S: One text query per identified item
+        S-->>V: Search snippets and context
+    end
+    V->>G: Photo and available search context
+    G-->>V: Meal analysis as JSON text
+    V-->>API: Parsed analysis
+    API-->>UI: Validated FoodAnalysisResponse
+    UI->>UI: Preview result and log on confirmation
+```
+
+| Component | Responsibility |
+| --- | --- |
+| **Browser** · `Diet.jsx` | Sends a multipart form with the image in `file` and `deep_search=true`. On confirmation, the current UI logs calories, protein, carbs, and fat from the first detected item. |
+| **Food API** · `app/routers/food.py` | Checks the upload's declared image type, reads the bytes, and calls the analysis pipeline. FastAPI validates the returned data against `FoodAnalysisResponse` in `app/schemas.py`. |
+| **Analysis pipeline** · `app/core/vision.py` | Uses Pillow to fit the photo within 1024 × 1024 pixels. It calls the same configured Gemini client twice: first to identify foods and portions, then to estimate nutrients using the photo and available search results. |
+| **Nutrition lookup** · `app/core/search.py` | Schedules per-item text queries concurrently. The search client caches results and spaces outgoing SerpAPI requests. Only Gemini receives the meal photo on the cloud path. |
+
+**Fallback behavior.** If a nutrition lookup fails or its API key is missing, the pipeline passes an unavailable-search note to the second Gemini call. If cloud analysis raises an exception, including invalid JSON, `vision.py` attempts local GGUF inference on the food server. Here `deep_search` selects the heavier local model. The flag does not control whether the cloud path performs nutrition lookups.
