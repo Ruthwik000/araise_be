@@ -8,22 +8,31 @@ The [ARAISE web app](https://github.com/Ruthwik000/Arasie) provides the workout 
 
 ```mermaid
 flowchart TD
-    Client["Camera client"] -->|Base64 image over WebSocket| API["FastAPI handler in main.py"]
-    API --> Decode["OpenCV decodes the image"]
-    Decode --> Select["Select tracker from URL"]
-    Select --> Reps["Curl, squat, or push-up tracker"]
-    Select --> Hold["Plank timer"]
-    Reps --> Pose["Shared MediaPipe pose detector"]
-    Hold --> Pose
-    Pose --> Measure["Check landmark visibility and smooth the joint angle"]
-    Measure --> Update["Selected tracker updates its count or timer"]
-    Update --> Reply["Build feedback and encode annotated JPEG"]
-    Reply -->|JSON response| Client
+    subgraph Browser["Frontend · browser"]
+        Camera["Workout camera"] --> Landmarks["MediaPipe detects joints"]
+        Test["One-frame test in this README"]
+        Screen["Workout screen or test console"]
+    end
+    subgraph Server["Backend · Python server"]
+        Socket["FastAPI WebSocket"] --> Decode{"Can OpenCV decode an image?"}
+        Decode -->|No| Skip["Skip message without a reply"]
+        Decode -->|Yes| Pose["MediaPipe measures pose"]
+        Pose --> Tracker["Exercise tracker counts reps or times a plank"]
+    end
+    Landmarks -->|Joint coordinates as JSON| Socket
+    Test -->|Base64 image| Socket
+    Tracker -->|JSON metrics and optional JPEG| Screen
 ```
 
-[main.py](./main.py) owns the connection, decodes each image, and sends the response. [excersises.py](./excersises.py) contains the shared pose detector and four exercise trackers. Each tracker measures a 2D angle from three right-side landmarks, requires visibility of at least 0.7 for each, and averages up to five valid angle readings before applying its movement rule.
+**Frontend (browser).** The React workout screen opens the camera for the selected exercise. `PoseAnalyzer.jsx` uses MediaPipe to locate joints in each frame, and `websocket.js` sends their coordinates to `/ws/{exercise}`. When the screen receives a result, it displays the count, angle, stage, and feedback. It can also read the feedback aloud.
+
+**Backend (Python server).** FastAPI accepts the connection and OpenCV decodes each base64 image. The selected tracker calls MediaPipe on that image, checks that all three required right-side joints have visibility of at least 0.7, and averages up to five valid joint angles. It uses that angle to count a rep or update the plank timer. The server sends the result back over the same socket. See [main.py](./main.py) and [excersises.py](./excersises.py).
+
+**Why the two browser paths differ.** The current React client sends joint coordinates as JSON. The backend expects a base64 image, so it skips those messages and the workout screen receives no server feedback from them. The [one-frame test](#try-one-frame) sends an image in the accepted format and prints the server's reply.
 
 ## What each exercise measures
+
+Use one of the four paths below. The server accepts connections for other exercise names but skips their frames without replying.
 
 | WebSocket path | Joint | When the result changes |
 | --- | --- | --- |
@@ -71,7 +80,6 @@ On a fresh server, the expected metrics for that blank frame are:
 
 For live tracking, draw the current video frame onto the canvas before sending it and keep the socket open across frames. The server accepts raw base64 text or an image data URL. The optional `processed_frame` response field contains base64 JPEG data. Prefix it with `data:image/jpeg;base64,` to display it in an image element.
 
-## Frontend compatibility and session state
+## Session state
 
-- **WebSocket input.** The current ARAISE camera client sends joint coordinates as JSON. This backend expects encoded image bytes and skips messages it cannot decode. The two versions need a common input format for rep counts and feedback to reach the workout screen. An unsupported exercise name also produces no reply.
-- **Shared progress.** Each server process creates one detector and one tracker per exercise. Clients using the same exercise share its counter, stage, and angle history. Reconnecting to the same process keeps that state. Restarting the process clears it. The handler does not use the frontend's `user_id` query parameter to isolate workouts.
+Each server process creates one detector and one tracker per exercise. Clients using the same exercise share its counter, stage, and angle history. Reconnecting to the same process keeps that state. Restarting the process clears it. The handler does not use the frontend's `user_id` query parameter to isolate workouts.
